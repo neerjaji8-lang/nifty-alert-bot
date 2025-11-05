@@ -5,13 +5,13 @@ import os
 
 app = Flask(__name__)
 
-# 🌐 Environment Variables (Cloud Run)
+# 🌐 Environment Variables
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SYMBOL = os.getenv("SYMBOL", "NIFTY")
 STRIKE_STEP = int(os.getenv("STRIKE_STEP", "50"))
 
-# 🧠 Dummy Data (replace later with Angel One API)
+# 🧠 Dummy Data (replace with Angel One API later)
 def fetch_option_chain_data():
     call_data = [
         {"strike": 25550, "change_in_oi": 0, "iv": 3.06, "iv_change": 0.00, "vol_perc": 15},
@@ -48,49 +48,48 @@ def calculate_totals(data):
     return total_oi, avg_iv, avg_vol
 
 
-# 🎨 Table Formatter — Perfectly aligned monospace columns
+# 🎨 Table Formatter (Full Width & Perfect Alignment)
 def format_table(title, data, color_emoji):
     total_oi, avg_iv, avg_vol = calculate_totals(data)
 
-    text = f"{color_emoji} *{title} SIDE*\n"
-    text += "```\n"  # monospace start
+    table = f"<b>{color_emoji} {title} SIDE</b>\n"
+    table += "<pre>\n"
+    # Wider column widths for full stretch
+    table += f"{'Strike':<12} | {'ΔOI':<14} | {'IV':<10} | {'ΔIV':<10} | {'VOL':<10}\n"
+    table += "-" * 72 + "\n"
 
-    # Table header
-    text += f"{'Strike':<9} | {'ΔOI':<10} | {'IV':<7} | {'ΔIV':<7} | {'VOL':<7}\n"
-    text += "-" * 55 + "\n"
-
-    # Table rows
     for row in data:
-        text += (
-            f"{str(row['strike']):<9} | "
-            f"{str(row['change_in_oi']):<10} | "
-            f"{str(row['iv']):<7} | "
-            f"{str(row['iv_change']):<7} | "
-            f"{str(row['vol_perc']):<7}\n"
+        table += (
+            f"{str(row['strike']):<12} | "
+            f"{str(row['change_in_oi']):<14} | "
+            f"{str(row['iv']):<10} | "
+            f"{str(row['iv_change']):<10} | "
+            f"{str(row['vol_perc']):<10}\n"
         )
 
-    text += "-" * 55 + "\n"
-    text += f"Total → ΔOI:{total_oi:+} │ IV:{avg_iv} │ VOL%:{avg_vol}\n"
-    text += "```\n"
-    return text
+    table += "-" * 72 + "\n"
+    table += f"Total → ΔOI:{total_oi:+} │ IV:{avg_iv} │ VOL%:{avg_vol}\n"
+    table += "</pre>\n"
+    return table
 
 
-# 📩 Telegram Message Sender
+# 📩 Telegram Sender
 def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
-        "parse_mode": "Markdown"
+        "parse_mode": "HTML"  # ✅ HTML for perfect monospace alignment
     }
     r = requests.post(url, data=payload)
     return r.status_code
 
 
-# 🧭 Bot Route (triggered by Cloud Scheduler)
+# 🧭 Main Route
 @app.route('/run', methods=['GET'])
 def run_bot():
     now = datetime.datetime.now().strftime("%d-%b %H:%M:%S IST")
+
     call_data, put_data, futures_data, spot_price = fetch_option_chain_data()
 
     call_text = format_table("CALL", call_data, "🟢")
@@ -98,15 +97,15 @@ def run_bot():
 
     fut = futures_data
     futures_text = (
-        f"⚙️ *Futures Δ:* ΔOI:{fut['delta_oi']} │ ΔVOL:{fut['delta_vol']}\n"
-        f"*Buy:* {fut['buy_qty']:,} │ *Sell:* {fut['sell_qty']:,}\n"
-        f"*Bias:* 🟢 *{fut['bias']} ({fut['bias_diff']:,})*\n"
+        f"⚙️ <b>Futures Δ:</b> ΔOI:{fut['delta_oi']} │ ΔVOL:{fut['delta_vol']}<br>"
+        f"<b>Buy:</b> {fut['buy_qty']:,} │ <b>Sell:</b> {fut['sell_qty']:,}<br>"
+        f"<b>Bias:</b> 🟢 {fut['bias']} ({fut['bias_diff']:,})"
     )
 
     header = (
-        f"📊 *{SYMBOL} Option Chain*\n"
-        f"🗓 *{now}* │ *Exp:* 04-Nov-2025\n"
-        f"📈 *Spot:* {spot_price}\n\n"
+        f"📊 <b>{SYMBOL} Option Chain</b><br>"
+        f"🗓 {now} │ Exp: 04-Nov-2025<br>"
+        f"📈 Spot: {spot_price}<br><br>"
     )
 
     message = header + call_text + put_text + futures_text
@@ -115,10 +114,10 @@ def run_bot():
     return f"Message sent. Telegram status: {status}", 200
 
 
-# 🔹 Health route
+# 🔹 Health Check Route
 @app.route('/')
 def home():
-    return "Nifty Alert Bot is active 🚀", 200
+    return "Nifty Alert Bot (Wide Layout) is active 🚀", 200
 
 
 if __name__ == '__main__':
