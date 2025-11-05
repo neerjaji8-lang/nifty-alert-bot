@@ -1,28 +1,126 @@
-from flask import Flask, request
+from flask import Flask, request, jsonify
 import requests
 import datetime
 import os
 
 app = Flask(__name__)
 
+# 🌐 Environment Variables
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+SYMBOL = os.getenv("SYMBOL", "NIFTY")
+STRIKE_STEP = int(os.getenv("STRIKE_STEP", "50"))
 
-@app.route('/run', methods=['GET'])
-def run_bot():
-    text = "<pre>Test message for Telegram parse check\nΔOI: 10 │ IV: 3.25 │ VOL: 250</pre>"
+# 🧩 Dummy Data for Testing (replace with live Angel One data later)
+def fetch_option_chain_data():
+    call_data = [
+        {"strike": 25550, "change_in_oi": 0, "iv": 3.06, "iv_change": 0.00, "vol_perc": 15},
+        {"strike": 25600, "change_in_oi": 0, "iv": 0.22, "iv_change": 0.00, "vol_perc": 15},
+        {"strike": 25650, "change_in_oi": 0, "iv": 1.67, "iv_change": 0.00, "vol_perc": 2626},
+        {"strike": 25700, "change_in_oi": 0, "iv": 3.20, "iv_change": 0.00, "vol_perc": 163},
+        {"strike": 25750, "change_in_oi": 0, "iv": 4.51, "iv_change": 0.00, "vol_perc": 1627},
+        {"strike": 25800, "change_in_oi": 0, "iv": 5.78, "iv_change": 0.00, "vol_perc": 152},
+    ]
+    put_data = [
+        {"strike": 25650, "change_in_oi": 0, "iv": 0.00, "iv_change": 0.00, "vol_perc": 0.0},
+        {"strike": 25550, "change_in_oi": 0, "iv": 1.39, "iv_change": 0.00, "vol_perc": 0.0},
+        {"strike": 25500, "change_in_oi": 0, "iv": 2.71, "iv_change": 0.00, "vol_perc": 0.0},
+        {"strike": 25450, "change_in_oi": 0, "iv": 3.96, "iv_change": 0.00, "vol_perc": 0.0},
+        {"strike": 25400, "change_in_oi": 0, "iv": 5.19, "iv_change": 0.00, "vol_perc": 0.0},
+    ]
+    futures_data = {
+        "delta_oi": 0,
+        "delta_vol": 0,
+        "buy_qty": 9507225,
+        "sell_qty": 2566575,
+        "bias": "Bullish",
+        "bias_diff": 6940650
+    }
+    spot_price = 25597.65
+    return call_data, put_data, futures_data, spot_price
+
+
+# 🧮 Calculate Totals
+def calculate_totals(data):
+    total_oi = sum(item["change_in_oi"] for item in data)
+    avg_iv = round(sum(item["iv"] for item in data) / len(data), 2)
+    avg_vol = round(sum(item["vol_perc"] for item in data) / len(data), 2)
+    return total_oi, avg_iv, avg_vol
+
+
+# 🎨 Format Table (HTML parse mode, perfect width)
+def format_table(title, data, color_emoji):
+    total_oi, avg_iv, avg_vol = calculate_totals(data)
+    sep_line = "─" * 82  # ✅ reduced from 88 to avoid wrapping
+
+    table = f"<b>{color_emoji} {title} SIDE</b>\n"
+    table += "<pre>"
+    table += f"{'Strike':<14} | {'ΔOI':<18} | {'IV':<13} | {'ΔIV':<13} | {'VOL':<12}\n"
+    table += sep_line + "\n"
+
+    for row in data:
+        table += (
+            f"{row['strike']:<14} | "
+            f"{row['change_in_oi']:<18} | "
+            f"{row['iv']:<13} | "
+            f"{row['iv_change']:<13} | "
+            f"{row['vol_perc']:<12}\n"
+        )
+
+    table += sep_line + "\n"
+    table += f"Total → ΔOI:{total_oi:+} │ IV:{avg_iv} │ VOL%:{avg_vol}"
+    table += "</pre>\n"
+    return table
+
+
+# 📬 Telegram Sender (returns JSON response)
+def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
-        "parse_mode": "HTML"
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
     }
     r = requests.post(url, data=payload)
-    return f"Telegram status: {r.status_code}, Response: {r.text}", 200
+    try:
+        return r.status_code, r.json()
+    except:
+        return r.status_code, {"error": "Invalid response from Telegram"}
 
+
+# 🧭 Bot Route
+@app.route('/run', methods=['GET'])
+def run_bot():
+    now = datetime.datetime.now().strftime("%d-%b %H:%M:%S IST")
+    call_data, put_data, futures_data, spot_price = fetch_option_chain_data()
+
+    header = (
+        f"<b>📊 {SYMBOL} Option Chain</b>\n"
+        f"🗓 {now} │ Exp: 04-Nov-2025\n"
+        f"📈 Spot: {spot_price}\n\n"
+    )
+
+    call_text = format_table("CALL", call_data, "🟢")
+    put_text = format_table("PUT", put_data, "🔴")
+
+    fut = futures_data
+    futures_text = (
+        f"<b>⚙️ Futures Δ:</b> ΔOI:{fut['delta_oi']} │ ΔVOL:{fut['delta_vol']}\n"
+        f"<b>Buy:</b> {fut['buy_qty']:,} │ <b>Sell:</b> {fut['sell_qty']:,}\n"
+        f"<b>Bias:</b> 🟢 {fut['bias']} ({fut['bias_diff']:,})"
+    )
+
+    message = header + call_text + put_text + futures_text
+    status, resp = send_telegram_message(message)
+    return jsonify({"status": status, "telegram_response": resp})
+
+
+# 🩺 Health Check
 @app.route('/')
 def home():
-    return "Diagnostic test running ✅", 200
+    return jsonify({"status": "ok", "message": "Nifty Bot Final JSON Version Active ✅"})
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
