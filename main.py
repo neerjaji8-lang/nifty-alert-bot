@@ -1,324 +1,111 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+from flask import Flask, request
+import requests
+import datetime
+import os
 
-import os, json, requests
-from datetime import datetime, timezone, timedelta
-from flask import Flask, jsonify
+app = Flask(__name__)
 
-# ------------- CONFIG -------------
+# 🧠 Environment variables (Cloud Run se load)
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SYMBOL = os.getenv("SYMBOL", "NIFTY")
 STRIKE_STEP = int(os.getenv("STRIKE_STEP", "50"))
-TZ = timezone(timedelta(hours=5, minutes=30))  # IST
-CACHE_PATH = "/tmp/last_data.json"  # Cloud Run writable path
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-    "Referer": "https://www.nseindia.com/",
-}
+# 🔹 Dummy data fetch simulation (replace with your Angel One API logic)
+def fetch_option_chain_data():
+    call_data = [
+        {"strike": 25550, "change_in_oi": 0, "iv": 3.06, "iv_change": 0.00, "vol_perc": 0.00},
+        {"strike": 25600, "change_in_oi": 0, "iv": 0.22, "iv_change": 0.00, "vol_perc": 0.00},
+        {"strike": 25650, "change_in_oi": 0, "iv": 1.67, "iv_change": 0.00, "vol_perc": 0.00},
+        {"strike": 25700, "change_in_oi": 0, "iv": 3.20, "iv_change": 0.00, "vol_perc": 0.00},
+        {"strike": 25750, "change_in_oi": 0, "iv": 4.51, "iv_change": 0.00, "vol_perc": 0.00},
+        {"strike": 25800, "change_in_oi": 0, "iv": 5.78, "iv_change": 0.00, "vol_perc": 0.00},
+    ]
+    put_data = [
+        {"strike": 25650, "change_in_oi": 0, "iv": 0.00, "iv_change": 0.00, "vol_perc": 0.00},
+        {"strike": 25550, "change_in_oi": 0, "iv": 1.39, "iv_change": 0.00, "vol_perc": 0.00},
+        {"strike": 25500, "change_in_oi": 0, "iv": 2.71, "iv_change": 0.00, "vol_perc": 0.00},
+        {"strike": 25450, "change_in_oi": 0, "iv": 3.96, "iv_change": 0.00, "vol_perc": 0.00},
+        {"strike": 25400, "change_in_oi": 0, "iv": 5.19, "iv_change": 0.00, "vol_perc": 0.00},
+    ]
+    futures_data = {
+        "delta_oi": 0,
+        "delta_vol": 0,
+        "buy_qty": 9507225,
+        "sell_qty": 2566575,
+        "bias": "Bullish",
+        "bias_diff": 6940650
+    }
+    spot_price = 25597.65
+    return call_data, put_data, futures_data, spot_price
 
-OC_URL = f"https://www.nseindia.com/api/option-chain-indices?symbol={SYMBOL}"
-DERIV_URL = f"https://www.nseindia.com/api/quote-derivative?symbol={SYMBOL}"
 
-# ------------- APP -------------
-app = Flask(__name__)
-session = requests.Session()
+# 🔹 Helper function to calculate totals
+def calculate_totals(data):
+    total_oi = sum(item["change_in_oi"] for item in data)
+    avg_iv = round(sum(item["iv"] for item in data) / len(data), 2) if data else 0
+    avg_vol = round(sum(item["vol_perc"] for item in data) / len(data), 2) if data else 0
+    return total_oi, avg_iv, avg_vol
 
-# ------------- UTIL -------------
-def market_open_now() -> bool:
-    now = datetime.now(TZ)
-    if now.weekday() > 4:
-        return False
-    start = now.replace(hour=9, minute=15, second=0, microsecond=0)
-    end = now.replace(hour=15, minute=30, second=0, microsecond=0)
-    return start <= now <= end
 
-def warmup():
-    try:
-        session.get("https://www.nseindia.com", headers=HEADERS, timeout=10)
-    except Exception:
-        pass
+# 🔹 Format Option Chain neatly for Telegram
+def format_table(title, data):
+    total_oi, avg_iv, avg_vol = calculate_totals(data)
+    text = f"*{title} SIDE*\n"
+    text += "```\nStrike     ΔOI      IV      ΔIV     VOL%\n"
+    for row in data:
+        text += f"{row['strike']:<8}{row['change_in_oi']:<9}{row['iv']:<8}{row['iv_change']:<8}{row['vol_perc']:<8}\n"
+    text += "```\n"
+    text += f"*Total → ΔOI:* {total_oi:+} │ *IV:* {avg_iv} │ *VOL%:* {avg_vol}\n\n"
+    return text
 
-def round_step(x: float) -> int:
-    return int(round(x / STRIKE_STEP) * STRIKE_STEP)
 
-def pick_strikes(spot: float, side: str):
-    """Return [1 ITM, 1 ATM, 4 OTM] for CE/PE."""
-    atm = round_step(spot)
-    if side == "CE":
-        itm = atm - STRIKE_STEP
-        otm = [atm + i * STRIKE_STEP for i in range(1, 5)]
-    else:  # PE
-        itm = atm + STRIKE_STEP
-        otm = [atm - i * STRIKE_STEP for i in range(1, 5)]
-    return [itm, atm] + otm
+# 🔹 Send message to Telegram
+def send_telegram_message(text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "Markdown"
+    }
+    r = requests.post(url, data=payload)
+    return r.status_code
 
-def sign_dot(v):
-    if v is None or v == 0:
-        return "⚪"
-    return "🟢" if v > 0 else "🔴"
 
-def fmt_int(v):
-    if v is None:
-        return "—"
-    return f"{int(v):,}"
+# 🔹 Flask route for Cloud Run trigger
+@app.route('/run', methods=['GET'])
+def run_bot():
+    now = datetime.datetime.now().strftime("%d-%b %H:%M:%S IST")
 
-def fmt_float(v, dp=2, show_sign=False):
-    if v is None:
-        return "—"
-    s = f"{v:.{dp}f}"
-    if show_sign and not s.startswith("-") and v != 0:
-        s = "+" + s
-    return s
+    call_data, put_data, futures_data, spot_price = fetch_option_chain_data()
 
-def load_cache():
-    if not os.path.exists(CACHE_PATH):
-        return None
-    try:
-        with open(CACHE_PATH, "r") as f:
-            return json.load(f)
-    except Exception:
-        return None
+    call_text = format_table("CALL", call_data)
+    put_text = format_table("PUT", put_data)
 
-def save_cache(obj):
-    try:
-        with open(CACHE_PATH, "w") as f:
-            json.dump(obj, f)
-    except Exception:
-        pass
+    fut = futures_data
+    futures_text = (
+        f"⚙️ *Futures Δ:* ΔOI:{fut['delta_oi']} │ ΔVOL:{fut['delta_vol']}\n"
+        f"*Buy:* {fut['buy_qty']:,} │ *Sell:* {fut['sell_qty']:,}\n"
+        f"*Bias:* 🟢 *{fut['bias']} ({fut['bias_diff']:,})*\n"
+    )
 
-# ------------- FETCH -------------
-def get_option_chain():
-    warmup()
-    r = session.get(OC_URL, headers=HEADERS, timeout=20)
-    r.raise_for_status()
-    js = r.json()
-    expiry = js["records"]["expiryDates"][0]
-    spot = float(js["records"]["underlyingValue"])
-    data = [d for d in js["records"]["data"] if d["expiryDate"] == expiry]
-    return expiry, spot, data
+    header = (
+        f"📊 *{SYMBOL} Option Chain*\n"
+        f"🗓 *{now}* │ *Exp:* 04-Nov-2025\n"
+        f"📈 *Spot:* {spot_price}\n\n"
+    )
 
-def lookup_leg(data, strike, side):
-    """Return tuple (oi, iv, vol, changeInOI) for given strike/side."""
-    s = int(strike)
-    for d in data:
-        if int(d.get("strikePrice", -1)) == s and side in d:
-            leg = d[side]
-            oi = float(leg.get("openInterest", 0) or 0)
-            iv = float(leg.get("impliedVolatility", 0) or 0)
-            vol = float(leg.get("totalTradedVolume", 0) or 0)
-            coi = float(leg.get("changeinOpenInterest", 0) or 0)  # NSE session ΔOI
-            return oi, iv, vol, coi
-    return 0.0, 0.0, 0.0, 0.0
+    message = header + call_text + put_text + futures_text
+    status = send_telegram_message(message)
 
-def deep_find(obj, *keys_like):
-    """Find first numeric value whose key contains all substrings in keys_like."""
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            lk = k.lower()
-            if all(s in lk for s in keys_like) and isinstance(v, (int, float)):
-                return float(v)
-        for v in obj.values():
-            got = deep_find(v, *keys_like)
-            if got is not None:
-                return got
-    elif isinstance(obj, list):
-        for it in obj:
-            got = deep_find(it, *keys_like)
-            if got is not None:
-                return got
-    return None
+    return f"Message sent. Telegram status: {status}", 200
 
-def get_futures_extras():
-    """Return (fut_oi, fut_vol, total_buy_qty, total_sell_qty)."""
-    try:
-        r = session.get(DERIV_URL, headers=HEADERS, timeout=20)
-        r.raise_for_status()
-        js = r.json()
-        # OI and Volume (best-effort recursive)
-        fut_oi = deep_find(js, "open", "interest") or 0.0
-        fut_vol = deep_find(js, "volume") or 0.0
-        # Order book totals
-        tbq = deep_find(js, "totalbuyquantity") or 0.0
-        tsq = deep_find(js, "totalsellquantity") or 0.0
-        return float(fut_oi), float(fut_vol), int(tbq), int(tsq)
-    except Exception:
-        return 0.0, 0.0, 0, 0
 
-# ------------- CORE -------------
-def build_side_rows(spot, data, prev_legs, side):
-    strikes = pick_strikes(spot, side)
-    rows = []
-    new_legs = {}
-    total_volpct_sum = 0.0
-    volpct_count = 0
-    for s in strikes:
-        oi, iv, vol, nse_coi = lookup_leg(data, s, side)
-        key = f"{side}:{s}"
-        prev = prev_legs.get(key) if prev_legs else None
-        if prev:
-            d_oi = oi - float(prev.get("oi", 0))
-            d_iv = iv - float(prev.get("iv", 0))
-            d_vol = vol - float(prev.get("vol", 0))
-        else:
-            d_oi = d_iv = d_vol = None
+# 🔹 Default health route
+@app.route('/')
+def home():
+    return "Nifty Alert Bot is active 🚀", 200
 
-        # VOL% (ΔVOL / OI * 100). If OI==0 or d_vol is None -> None
-        if d_vol is None or oi == 0:
-            volpct = None
-        else:
-            volpct = (d_vol / oi) * 100.0
 
-        if volpct is not None:
-            total_volpct_sum += volpct
-            volpct_count += 1
-
-        rows.append({
-            "strike": s,
-            "doi": d_oi if d_oi is not None else nse_coi,  # fallback to NSE session ΔOI on first run
-            "iv": iv,
-            "div": d_iv,
-            "volpct": volpct
-        })
-
-        new_legs[key] = {"oi": oi, "iv": iv, "vol": vol}
-
-    avg_volpct = (total_volpct_sum / volpct_count) if volpct_count else None
-    return rows, new_legs, avg_volpct
-
-def render_rows(rows):
-    out = []
-    out.append(f"{'Strike':>7}  {'ΔOI':>9}  {'IV':>6}  {'ΔIV':>7}  {'VOL%':>7}")
-    out.append("-" * 44)
-    for r in rows:
-        dot_doi = sign_dot(0 if r["doi"] is None else r["doi"])
-        dot_div = sign_dot(0 if r["div"] is None else r["div"])
-        dot_vp = sign_dot(0 if r["volpct"] is None else r["volpct"])
-        doi_txt = "—" if r["doi"] is None else f"{int(r['doi']):+d}"
-        div_txt = fmt_float(r["div"], 2, show_sign=True) if r["div"] is not None else "—"
-        vp_txt = fmt_float(r["volpct"], 2, show_sign=True) if r["volpct"] is not None else "—"
-        out.append(
-            f"{r['strike']:>7}  "
-            f"{dot_doi} {doi_txt:>6}  "
-            f"{fmt_float(r['iv'],2):>6}  "
-            f"{dot_div} {div_txt:>5}  "
-            f"{dot_vp} {vp_txt:>6}"
-        )
-    return "\n".join(out)
-
-def build_message(expiry, spot, ce_rows, ce_avg_vp, pe_rows, pe_avg_vp, fut_delta, buy_qty, sell_qty):
-    now = datetime.now(TZ).strftime("%d-%b %H:%M:%S")
-    fdoi, fvol = fut_delta
-
-    bias_num = buy_qty - sell_qty
-    bias_side = "🟢 Bullish" if bias_num > 0 else ("🔴 Bearish" if bias_num < 0 else "⚪ Neutral")
-
-    lines = []
-    lines.append(f"<b>📊 {SYMBOL} Option Chain</b>")
-    lines.append(f"<b>🕒</b> {now} IST   <b>📅 Exp:</b> {expiry}")
-    lines.append(f"<b>Spot:</b> {spot:.2f}")
-    lines.append("")
-
-    # CALL table
-    lines.append("<b>CALL</b>")
-    lines.append("<pre>" + render_rows(ce_rows) + "</pre>")
-    lines.append(f"Avg VOL%: <b>{fmt_float(ce_avg_vp,2)}</b>")
-    lines.append("")
-
-    # PUT table
-    lines.append("<b>PUT</b>")
-    lines.append("<pre>" + render_rows(pe_rows) + "</pre>")
-    lines.append(f"Avg VOL%: <b>{fmt_float(pe_avg_vp,2)}</b>")
-    lines.append("")
-
-    # Futures block (no % for volume as requested)
-    fdoi_txt = "—" if fdoi is None else f"{int(fdoi):+d}"
-    fvol_txt = "—" if fvol is None else f"{int(fvol):+d}"
-    lines.append("<b>⚙️ Futures Δ</b>  "
-                 f"ΔOI: <b>{fdoi_txt}</b>  |  ΔVOL: <b>{fvol_txt}</b>")
-    lines.append(f"Buy: <b>{fmt_int(buy_qty)}</b>  |  Sell: <b>{fmt_int(sell_qty)}</b>  "
-                 f"|  Bias: <b>{bias_side}</b> ({fmt_int(abs(bias_num))})")
-
-    return "\n".join(lines)
-
-def send_telegram(text):
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat = os.getenv("TELEGRAM_CHAT_ID")
-    if not token or not chat:
-        return {"ok": False, "error": "telegram env missing"}
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
-    try:
-        res = session.post(url, json=payload, timeout=20)
-        return res.json()
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-# ------------- RUN ONCE -------------
-def run_once():
-    if not market_open_now():
-        return {"ok": False, "msg": "market closed"}
-
-    try:
-        expiry, spot, data = get_option_chain()
-
-        # Load cache
-        cache = load_cache()
-        prev_legs = cache.get("legs", {}) if cache else {}
-
-        # Build CE/PE rows (with Δ from cache)
-        ce_rows, new_ce, ce_avg_vp = build_side_rows(spot, data, prev_legs, "CE")
-        pe_rows, new_pe, pe_avg_vp = build_side_rows(spot, data, prev_legs, "PE")
-
-        # Futures values
-        fut_oi, fut_vol, buy_qty, sell_qty = get_futures_extras()
-
-        # Futures Δ using cache
-        if cache and "futures" in cache:
-            prev_f = cache["futures"]
-            f_doi = fut_oi - float(prev_f.get("oi", 0))
-            f_dvol = fut_vol - float(prev_f.get("vol", 0))
-        else:
-            f_doi = None
-            f_dvol = None
-
-        # Prepare message
-        msg = build_message(
-            expiry, spot,
-            ce_rows, ce_avg_vp,
-            pe_rows, pe_avg_vp,
-            (f_doi, f_dvol),
-            buy_qty, sell_qty
-        )
-
-        # Save new cache
-        new_cache = {
-            "ts": datetime.now(TZ).isoformat(),
-            "expiry": expiry,
-            "spot": spot,
-            "legs": {**new_ce, **new_pe},
-            "futures": {"oi": fut_oi, "vol": fut_vol}
-        }
-        save_cache(new_cache)
-
-        # If first run (no cache previously), don't spam Telegram
-        if cache is None:
-            return {"ok": True, "primed": True, "note": "base snapshot stored"}
-
-        # Send Telegram
-        tg = send_telegram(msg)
-        return {"ok": True, "sent": tg}
-
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-# ------------- FLASK -------------
-@app.route("/")
-def health():
-    return "NIFTY Alert Bot Active ✅", 200
-
-@app.route("/run", methods=["GET", "POST"])
-def run():
-    return jsonify(run_once())
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080)
