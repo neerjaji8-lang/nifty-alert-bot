@@ -5,28 +5,28 @@ import os
 
 app = Flask(__name__)
 
-# 🌐 Environment Variables (Cloud Run se)
+# 🌐 Environment Variables (Cloud Run)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SYMBOL = os.getenv("SYMBOL", "NIFTY")
 STRIKE_STEP = int(os.getenv("STRIKE_STEP", "50"))
 
-# 🧠 Dummy Data (replace later with Angel One API fetch)
+# 🧠 Dummy Data (replace later with Angel One API)
 def fetch_option_chain_data():
     call_data = [
-        {"strike": 25550, "change_in_oi": 0, "iv": 3.06, "iv_change": 0.0, "vol_perc": 15},
-        {"strike": 25600, "change_in_oi": 0, "iv": 0.22, "iv_change": 0.0, "vol_perc": 15},
-        {"strike": 25650, "change_in_oi": 0, "iv": 1.67, "iv_change": 0.0, "vol_perc": 2626},
-        {"strike": 25700, "change_in_oi": 0, "iv": 3.20, "iv_change": 0.0, "vol_perc": 163},
-        {"strike": 25750, "change_in_oi": 0, "iv": 4.51, "iv_change": 0.0, "vol_perc": 1627},
-        {"strike": 25800, "change_in_oi": 0, "iv": 5.78, "iv_change": 0.0, "vol_perc": 152},
+        {"strike": 25550, "change_in_oi": 0, "iv": 3.06, "iv_change": 0.00, "vol_perc": 15},
+        {"strike": 25600, "change_in_oi": 0, "iv": 0.22, "iv_change": 0.00, "vol_perc": 15},
+        {"strike": 25650, "change_in_oi": 0, "iv": 1.67, "iv_change": 0.00, "vol_perc": 2626},
+        {"strike": 25700, "change_in_oi": 0, "iv": 3.20, "iv_change": 0.00, "vol_perc": 163},
+        {"strike": 25750, "change_in_oi": 0, "iv": 4.51, "iv_change": 0.00, "vol_perc": 1627},
+        {"strike": 25800, "change_in_oi": 0, "iv": 5.78, "iv_change": 0.00, "vol_perc": 152},
     ]
     put_data = [
-        {"strike": 25650, "change_in_oi": 0, "iv": 0.00, "iv_change": 0.0, "vol_perc": 0.0},
-        {"strike": 25550, "change_in_oi": 0, "iv": 1.39, "iv_change": 0.0, "vol_perc": 0.0},
-        {"strike": 25500, "change_in_oi": 0, "iv": 2.71, "iv_change": 0.0, "vol_perc": 0.0},
-        {"strike": 25450, "change_in_oi": 0, "iv": 3.96, "iv_change": 0.0, "vol_perc": 0.0},
-        {"strike": 25400, "change_in_oi": 0, "iv": 5.19, "iv_change": 0.0, "vol_perc": 0.0},
+        {"strike": 25650, "change_in_oi": 0, "iv": 0.00, "iv_change": 0.00, "vol_perc": 0.0},
+        {"strike": 25550, "change_in_oi": 0, "iv": 1.39, "iv_change": 0.00, "vol_perc": 0.0},
+        {"strike": 25500, "change_in_oi": 0, "iv": 2.71, "iv_change": 0.00, "vol_perc": 0.0},
+        {"strike": 25450, "change_in_oi": 0, "iv": 3.96, "iv_change": 0.00, "vol_perc": 0.0},
+        {"strike": 25400, "change_in_oi": 0, "iv": 5.19, "iv_change": 0.00, "vol_perc": 0.0},
     ]
     futures_data = {
         "delta_oi": 0,
@@ -48,25 +48,34 @@ def calculate_totals(data):
     return total_oi, avg_iv, avg_vol
 
 
-# 🎨 Table Formatter — Fixed Width Columns, Perfect Alignment
+# 🎨 Table Formatter — Perfectly aligned monospace columns
 def format_table(title, data, color_emoji):
     total_oi, avg_iv, avg_vol = calculate_totals(data)
+
     text = f"{color_emoji} *{title} SIDE*\n"
-    text += "```\nStrike      ΔOI         IV         ΔIV        VOL%\n"
+    text += "```\n"  # monospace start
+
+    # Table header
+    text += f"{'Strike':<9} | {'ΔOI':<10} | {'IV':<7} | {'ΔIV':<7} | {'VOL':<7}\n"
+    text += "-" * 55 + "\n"
+
+    # Table rows
     for row in data:
         text += (
-            f"{row['strike']:<10}"
-            f"{row['change_in_oi']:<11}"
-            f"{row['iv']:<10}"
-            f"{row['iv_change']:<10}"
-            f"{row['vol_perc']:<10}\n"
+            f"{str(row['strike']):<9} | "
+            f"{str(row['change_in_oi']):<10} | "
+            f"{str(row['iv']):<7} | "
+            f"{str(row['iv_change']):<7} | "
+            f"{str(row['vol_perc']):<7}\n"
         )
+
+    text += "-" * 55 + "\n"
+    text += f"Total → ΔOI:{total_oi:+} │ IV:{avg_iv} │ VOL%:{avg_vol}\n"
     text += "```\n"
-    text += f"*Total → ΔOI:* {total_oi:+} │ *IV:* {avg_iv} │ *VOL%:* {avg_vol}\n\n"
     return text
 
 
-# 📩 Telegram Sender
+# 📩 Telegram Message Sender
 def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
@@ -78,11 +87,10 @@ def send_telegram_message(text):
     return r.status_code
 
 
-# 🧭 Main Bot Route
+# 🧭 Bot Route (triggered by Cloud Scheduler)
 @app.route('/run', methods=['GET'])
 def run_bot():
     now = datetime.datetime.now().strftime("%d-%b %H:%M:%S IST")
-
     call_data, put_data, futures_data, spot_price = fetch_option_chain_data()
 
     call_text = format_table("CALL", call_data, "🟢")
@@ -107,7 +115,7 @@ def run_bot():
     return f"Message sent. Telegram status: {status}", 200
 
 
-# 🔹 Default route (health check)
+# 🔹 Health route
 @app.route('/')
 def home():
     return "Nifty Alert Bot is active 🚀", 200
