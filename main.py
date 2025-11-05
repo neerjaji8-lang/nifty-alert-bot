@@ -5,13 +5,12 @@ import os
 
 app = Flask(__name__)
 
-# 🌐 Environment Variables
+# 🌐 Env vars
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SYMBOL = os.getenv("SYMBOL", "NIFTY")
 STRIKE_STEP = int(os.getenv("STRIKE_STEP", "50"))
 
-# 🧠 Dummy Data (replace later)
 def fetch_option_chain_data():
     call_data = [
         {"strike": 25550, "change_in_oi": 0, "iv": 3.06, "iv_change": 0.00, "vol_perc": 15},
@@ -40,35 +39,32 @@ def fetch_option_chain_data():
     return call_data, put_data, futures_data, spot_price
 
 
-# 📊 Totals
+# 📊 Total
 def calculate_totals(data):
     total_oi = sum(item["change_in_oi"] for item in data)
-    avg_iv = round(sum(item["iv"] for item in data) / len(data), 2) if data else 0
-    avg_vol = round(sum(item["vol_perc"] for item in data) / len(data), 2) if data else 0
+    avg_iv = round(sum(item["iv"] for item in data) / len(data), 2)
+    avg_vol = round(sum(item["vol_perc"] for item in data) / len(data), 2)
     return total_oi, avg_iv, avg_vol
 
 
-# 🎨 Formatter — Full Telegram Width
+# 🎨 Proper HTML-safe Formatting
 def format_table(title, data, color_emoji):
     total_oi, avg_iv, avg_vol = calculate_totals(data)
 
     table = f"<b>{color_emoji} {title} SIDE</b>\n"
-    table += "<pre>\n"
-    # Wider columns for max Telegram box width
+    table += "<pre>"
     table += f"{'Strike':<14} | {'ΔOI':<18} | {'IV':<13} | {'ΔIV':<13} | {'VOL':<12}\n"
     table += "-" * 88 + "\n"
-
     for row in data:
         table += (
-            f"{str(row['strike']):<14} | "
-            f"{str(row['change_in_oi']):<18} | "
-            f"{str(row['iv']):<13} | "
-            f"{str(row['iv_change']):<13} | "
-            f"{str(row['vol_perc']):<12}\n"
+            f"{row['strike']:<14} | "
+            f"{row['change_in_oi']:<18} | "
+            f"{row['iv']:<13} | "
+            f"{row['iv_change']:<13} | "
+            f"{row['vol_perc']:<12}\n"
         )
-
     table += "-" * 88 + "\n"
-    table += f"Total → ΔOI:{total_oi:+} │ IV:{avg_iv} │ VOL%:{avg_vol}\n"
+    table += f"Total → ΔOI:{total_oi:+} │ IV:{avg_iv} │ VOL%:{avg_vol}"
     table += "</pre>\n"
     return table
 
@@ -79,44 +75,43 @@ def send_telegram_message(text):
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
-        "parse_mode": "HTML"
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
     }
     r = requests.post(url, data=payload)
+    print("Telegram response:", r.text)  # ✅ helpful debugging line
     return r.status_code
 
 
-# 🧭 Main Bot
 @app.route('/run', methods=['GET'])
 def run_bot():
     now = datetime.datetime.now().strftime("%d-%b %H:%M:%S IST")
     call_data, put_data, futures_data, spot_price = fetch_option_chain_data()
+
+    header = (
+        f"<b>📊 {SYMBOL} Option Chain</b>\n"
+        f"🗓 {now} │ Exp: 04-Nov-2025\n"
+        f"📈 Spot: {spot_price}\n\n"
+    )
 
     call_text = format_table("CALL", call_data, "🟢")
     put_text = format_table("PUT", put_data, "🔴")
 
     fut = futures_data
     futures_text = (
-        f"⚙️ <b>Futures Δ:</b> ΔOI:{fut['delta_oi']} │ ΔVOL:{fut['delta_vol']}<br>"
-        f"<b>Buy:</b> {fut['buy_qty']:,} │ <b>Sell:</b> {fut['sell_qty']:,}<br>"
+        f"<b>⚙️ Futures Δ:</b> ΔOI:{fut['delta_oi']} │ ΔVOL:{fut['delta_vol']}\n"
+        f"<b>Buy:</b> {fut['buy_qty']:,} │ <b>Sell:</b> {fut['sell_qty']:,}\n"
         f"<b>Bias:</b> 🟢 {fut['bias']} ({fut['bias_diff']:,})"
-    )
-
-    header = (
-        f"📊 <b>{SYMBOL} Option Chain</b><br>"
-        f"🗓 {now} │ Exp: 04-Nov-2025<br>"
-        f"📈 Spot: {spot_price}<br><br>"
     )
 
     message = header + call_text + put_text + futures_text
     status = send_telegram_message(message)
-
     return f"Message sent. Telegram status: {status}", 200
 
 
-# 🔹 Health Check
 @app.route('/')
 def home():
-    return "Nifty Alert Bot (MAX WIDTH Version) Active 🚀", 200
+    return "Nifty Bot Fixed (No 400 Error) ✅", 200
 
 
 if __name__ == '__main__':
