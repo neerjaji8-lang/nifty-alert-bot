@@ -5,12 +5,13 @@ import os
 
 app = Flask(__name__)
 
-# 🌐 Env vars
+# 🌐 Environment Variables
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SYMBOL = os.getenv("SYMBOL", "NIFTY")
+STRIKE_STEP = int(os.getenv("STRIKE_STEP", "50"))
 
-# 🧠 Dummy data
+# 🧠 Dummy Data (replace later)
 def fetch_option_chain_data():
     call_data = [
         {"strike": 25550, "change_in_oi": 0, "iv": 3.06, "iv_change": 0.00, "vol_perc": 15},
@@ -47,41 +48,44 @@ def calculate_totals(data):
     return total_oi, avg_iv, avg_vol
 
 
-# 🎨 Ultra-wide table formatter
+# 🎨 Formatter — Full Telegram Width
 def format_table(title, data, color_emoji):
     total_oi, avg_iv, avg_vol = calculate_totals(data)
 
     table = f"<b>{color_emoji} {title} SIDE</b>\n"
     table += "<pre>\n"
-
-    # 👇 increased spacing — full message width use
-    table += f"{'Strike':<15} | {'ΔOI':<20} | {'IV':<15} | {'ΔIV':<15} | {'VOL':<15}\n"
-    table += "-" * 100 + "\n"
+    # Wider columns for max Telegram box width
+    table += f"{'Strike':<14} | {'ΔOI':<18} | {'IV':<13} | {'ΔIV':<13} | {'VOL':<12}\n"
+    table += "-" * 88 + "\n"
 
     for row in data:
         table += (
-            f"{str(row['strike']):<15} | "
-            f"{str(row['change_in_oi']):<20} | "
-            f"{str(row['iv']):<15} | "
-            f"{str(row['iv_change']):<15} | "
-            f"{str(row['vol_perc']):<15}\n"
+            f"{str(row['strike']):<14} | "
+            f"{str(row['change_in_oi']):<18} | "
+            f"{str(row['iv']):<13} | "
+            f"{str(row['iv_change']):<13} | "
+            f"{str(row['vol_perc']):<12}\n"
         )
 
-    table += "-" * 100 + "\n"
+    table += "-" * 88 + "\n"
     table += f"Total → ΔOI:{total_oi:+} │ IV:{avg_iv} │ VOL%:{avg_vol}\n"
     table += "</pre>\n"
     return table
 
 
-# 📩 Telegram send
+# 📬 Telegram Sender
 def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML"
+    }
     r = requests.post(url, data=payload)
     return r.status_code
 
 
-# 🧭 Main route
+# 🧭 Main Bot
 @app.route('/run', methods=['GET'])
 def run_bot():
     now = datetime.datetime.now().strftime("%d-%b %H:%M:%S IST")
@@ -109,10 +113,10 @@ def run_bot():
     return f"Message sent. Telegram status: {status}", 200
 
 
-# 🔹 Health check
+# 🔹 Health Check
 @app.route('/')
 def home():
-    return "Nifty Alert Bot (Ultra-Wide Table) Active ✅", 200
+    return "Nifty Alert Bot (MAX WIDTH Version) Active 🚀", 200
 
 
 if __name__ == '__main__':
