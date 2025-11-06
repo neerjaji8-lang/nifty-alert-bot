@@ -1,8 +1,8 @@
 from flask import Flask, jsonify
 import requests
 import datetime
+import pytz
 import os
-import json
 
 app = Flask(__name__)
 
@@ -25,29 +25,28 @@ session.headers.update(HEADERS)
 OPTION_URL = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
 FUTURE_URL = "https://www.nseindia.com/api/liveEquity-derivatives?index=nifty"
 
-
+# -------------------- TIME FIX --------------------
 def is_market_open():
-    now = datetime.datetime.now()
-    if now.weekday() >= 5:
+    tz = pytz.timezone("Asia/Kolkata")
+    now = datetime.datetime.now(tz)
+    if now.weekday() >= 5:  # Saturday, Sunday
         return False
-    market_open = now.replace(hour=9, minute=15, second=0)
-    market_close = now.replace(hour=15, minute=30, second=0)
+    market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
     return market_open <= now <= market_close
 
-
+# -------------------- HELPERS --------------------
 def get_data(url):
     res = session.get(url, timeout=10)
     return res.json()
 
-
 def percent(part, total):
     return round((part / total) * 100, 2) if total != 0 else 0
 
-
+# -------------------- MAIN APP --------------------
 @app.route("/")
 def home():
     return jsonify({"ok": True, "msg": "Nifty Alert Bot Active ✅"})
-
 
 @app.route("/run", methods=["GET", "POST"])
 def run_alert():
@@ -55,7 +54,7 @@ def run_alert():
         return jsonify({"msg": "market closed", "ok": False})
 
     try:
-        # ---------------- OPTION DATA ----------------
+        # ✅ Option Chain
         data = get_data(OPTION_URL)
         spot = round(data["records"]["underlyingValue"])
         expiry = data["records"]["expiryDates"][0]
@@ -75,46 +74,43 @@ def run_alert():
                     "oi": ce["openInterest"],
                     "coi": ce["changeinOpenInterest"],
                     "iv": ce["impliedVolatility"],
-                    "iv_chg": ce["impliedVolatility"] - ce.get("lastPrice", 0),
                     "vol": ce["totalTradedVolume"],
                     "vol%": percent(ce["totalTradedVolume"], ce["openInterest"])
                 })
-
             if pe:
                 pe_data.append({
                     "strike": strike,
                     "oi": pe["openInterest"],
                     "coi": pe["changeinOpenInterest"],
                     "iv": pe["impliedVolatility"],
-                    "iv_chg": pe["impliedVolatility"] - pe.get("lastPrice", 0),
                     "vol": pe["totalTradedVolume"],
                     "vol%": percent(pe["totalTradedVolume"], pe["openInterest"])
                 })
 
-        # Sort by strike
+        # Sort strikes
         ce_data.sort(key=lambda x: x["strike"])
         pe_data.sort(key=lambda x: x["strike"])
 
-        # Filter 1 ITM + 1 ATM + 4 OTM
+        # Select 1 ITM + 1 ATM + 4 OTM
         ce_filtered = [x for x in ce_data if atm_strike - 50 <= x["strike"] <= atm_strike + 200][:6]
         pe_filtered = [x for x in pe_data if atm_strike - 200 <= x["strike"] <= atm_strike + 50][-6:]
 
-        # ---------------- FUTURE DATA ----------------
+        # ✅ Futures data
         future = get_data(FUTURE_URL)
-        buy = sum([f["buyQuantity"] for f in future.get("data", []) if "buyQuantity" in f])
-        sell = sum([f["sellQuantity"] for f in future.get("data", []) if "sellQuantity" in f])
+        buy = sum([f.get("buyQuantity", 0) for f in future.get("data", [])])
+        sell = sum([f.get("sellQuantity", 0) for f in future.get("data", [])])
         bias = "🟢 Bullish" if buy > sell else "🔴 Bearish"
 
-        # ---------------- TELEGRAM MESSAGE ----------------
-        msg = f"⚡ *NIFTY Option Chain* ⚡\n" \
-              f"📅 `{datetime.datetime.now().strftime('%d-%b-%Y %H:%M:%S')}`\n" \
+        # ✅ Telegram message format
+        msg = f"📊 *NIFTY Option Chain*\n" \
+              f"🕒 {datetime.datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%d-%b-%Y %H:%M:%S')} IST\n" \
               f"📈 Spot: *{spot}* | Exp: `{expiry}`\n\n" \
               f"🟩 *CALL SIDE*\n" \
-              f"`Strike | ΔOI | IV | ΔIV | VOL%`\n" + \
-              "\n".join([f"{x['strike']} | {x['coi']} | {x['iv']} | {x['iv_chg']} | {x['vol%']}%" for x in ce_filtered]) + \
+              f"`Strike | ΔOI | IV | VOL%`\n" + \
+              "\n".join([f"{x['strike']} | {x['coi']} | {x['iv']} | {x['vol%']}%" for x in ce_filtered]) + \
               "\n\n🟥 *PUT SIDE*\n" \
-              f"`Strike | ΔOI | IV | ΔIV | VOL%`\n" + \
-              "\n".join([f"{x['strike']} | {x['coi']} | {x['iv']} | {x['iv_chg']} | {x['vol%']}%" for x in pe_filtered]) + \
+              f"`Strike | ΔOI | IV | VOL%`\n" + \
+              "\n".join([f"{x['strike']} | {x['coi']} | {x['iv']} | {x['vol%']}%" for x in pe_filtered]) + \
               f"\n\n💹 *Futures Data*\nBuy: `{buy:,}` | Sell: `{sell:,}` | Bias: {bias}"
 
         requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", data={
