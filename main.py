@@ -3,12 +3,12 @@
 
 from flask import Flask, jsonify, request
 import requests, os, json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 import pytz
 
 app = Flask(__name__)
 
-# ---------- ENV ----------
+# ========== ENV ==========
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 SYMBOL             = os.getenv("SYMBOL", "NIFTY")
@@ -16,7 +16,9 @@ STRIKE_STEP        = int(os.getenv("STRIKE_STEP", "50"))
 
 OC_URL    = f"https://www.nseindia.com/api/option-chain-indices?symbol={SYMBOL}"
 DERIV_URL = f"https://www.nseindia.com/api/quote-derivative?symbol={SYMBOL}"
+
 CACHE_PATH = "/tmp/oc_cache.json"
+IST = pytz.timezone("Asia/Kolkata")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -26,22 +28,19 @@ HEADERS = {
     "Origin":  "https://www.nseindia.com",
     "Connection": "keep-alive",
 }
-
 session = requests.Session()
 session.headers.update(HEADERS)
 
-IST = pytz.timezone("Asia/Kolkata")
-
-# ---------- TIME ----------
+# ========== TIME ==========
 def is_market_open():
     now = datetime.now(IST)
-    if now.weekday() >= 5:   # Sat=5, Sun=6
+    if now.weekday() >= 5:  # Sat/Sun
         return False
     start = now.replace(hour=9, minute=15, second=0, microsecond=0)
     end   = now.replace(hour=15, minute=30, second=0, microsecond=0)
     return start <= now <= end
 
-# ---------- IO ----------
+# ========== IO ==========
 def load_cache():
     if not os.path.exists(CACHE_PATH):
         return None
@@ -58,7 +57,7 @@ def save_cache(obj):
     except Exception:
         pass
 
-# ---------- HTTP HELPERS ----------
+# ========== HTTP ==========
 def warmup():
     try:
         session.get("https://www.nseindia.com", timeout=10)
@@ -92,13 +91,12 @@ def deep_find(obj, *contains):
                 return got
     return None
 
-# ---------- MATH ----------
+# ========== MATH ==========
 def rstep(x): return int(round(x / STRIKE_STEP) * STRIKE_STEP)
 
 def pick_strikes(spot, side):
     atm = rstep(spot)
     if side == "CE":
-        # 1 ITM, 1 ATM, 4 OTM
         return [atm - STRIKE_STEP, atm] + [atm + i*STRIKE_STEP for i in range(1,5)]
     else:
         return [atm + STRIKE_STEP, atm] + [atm - i*STRIKE_STEP for i in range(1,5)]
@@ -111,7 +109,7 @@ def percent(part, total):
         pass
     return 0.0
 
-# ---------- NSE PARSE ----------
+# ========== NSE PARSE ==========
 def fetch_option_chain():
     warmup()
     js = get_json(OC_URL)
@@ -137,19 +135,22 @@ def lookup(rows, strike, side):
     return 0.0, 0.0, 0.0
 
 def fetch_futures_extras():
+    """
+    Returns: fut_oi, fut_vol, buy_qty, sell_qty, fut_price
+    """
     warmup()
     js = get_json(DERIV_URL)
     if not js:
-        return 0, 0, 0, 0
-    fut_oi  = deep_find(js, "open", "interest") or 0.0
-    fut_vol = deep_find(js, "volume") or 0.0
-    buy_q   = deep_find(js, "totalbuyquantity") or 0.0
-    sell_q  = deep_find(js, "totalsellquantity") or 0.0
-    return int(fut_oi), int(fut_vol), int(buy_q), int(sell_q)
+        return 0, 0, 0, 0, 0.0
+    fut_oi    = deep_find(js, "open", "interest") or 0.0
+    fut_vol   = deep_find(js, "volume") or 0.0
+    buy_q     = deep_find(js, "totalbuyquantity") or 0.0
+    sell_q    = deep_find(js, "totalsellquantity") or 0.0
+    fut_price = deep_find(js, "lastprice") or 0.0
+    return int(fut_oi), int(fut_vol), int(buy_q), int(sell_q), float(fut_price)
 
-# ---------- RENDER ----------
+# ========== RENDER ==========
 def render_rows(side_rows):
-    # side_rows: list of dict with keys strike, doi, iv, div, cvol, cvolp
     lines = []
     lines.append(f"{'Strike':>7}  {'ΔOI':>9}  {'IV':>6}  {'ΔIV':>7}  {'CVol':>8}  {'CVol%':>7}")
     lines.append("-"*54)
@@ -163,11 +164,14 @@ def render_rows(side_rows):
         )
     return "<pre>" + "\n".join(lines) + "</pre>"
 
-def build_message(expiry, spot, ce_rows, ce_tot, pe_rows, pe_tot, fut_delta, buy, sell):
+def build_message(expiry, spot, ce_rows, ce_tot, pe_rows, pe_tot,
+                  fdoi, fvol, buy, sell, prem, dprem, build_tag):
     now = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S")
-    fdoi, fvol = fut_delta
     bias_num  = buy - sell
     bias_side = "🟢 Bullish" if bias_num > 0 else ("🔴 Bearish" if bias_num < 0 else "⚪ Neutral")
+    dprem_txt = "—" if dprem is None else f"{dprem:+.2f}"
+    fdoi_txt  = "—" if fdoi  is None else f"{int(fdoi):+d}"
+    fvol_txt  = "—" if fvol  is None else f"{int(fvol):+d}"
 
     msg = []
     msg.append(f"<b>📊 {SYMBOL} Option Chain</b>")
@@ -190,10 +194,9 @@ def build_message(expiry, spot, ce_rows, ce_tot, pe_rows, pe_tot, fut_delta, buy
                f"<i>ΣCVol:</i> <b>{pe_tot['sum_cvol']:,}</b>  |  "
                f"<i>Avg CVol%:</i> <b>{pe_tot['avg_cvolp']:.2f}</b>")
     msg.append("")
-    fdoi_txt = "—" if fdoi is None else f"{int(fdoi):+d}"
-    fvol_txt = "—" if fvol is None else f"{int(fvol):+d}"
     msg.append(f"⚙️ <b>Futures Δ</b>  ΔOI: <b>{fdoi_txt}</b>  |  ΔVOL: <b>{fvol_txt}</b>")
-    msg.append(f"Buy: <b>{buy:,}</b>  |  Sell: <b>{sell:,}</b>  |  Bias: <b>{bias_side}</b> ({abs(bias_num):,})")
+    msg.append(f"💹 <b>Depth</b>  Buy: <b>{buy:,}</b>  |  Sell: <b>{sell:,}</b>  |  Bias: <b>{bias_side}</b> ({abs(bias_num):,})")
+    msg.append(f"📐 <b>Premium</b>  Fut−Spot: <b>{prem:+.2f}</b>  (Δ {dprem_txt})  → <b>{build_tag}</b>")
     return "\n".join(msg)
 
 def send_telegram(text_html):
@@ -211,12 +214,15 @@ def send_telegram(text_html):
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-# ---------- MAIN RUN ----------
+# ========== SIDE COMPUTE ==========
 def compute_side(rows, prev_map, strikes, side):
     out = []
     sum_doi=sum_cvol=0
     sum_iv=sum_div=sum_cvolp=0.0
     cnt=0
+    # Also collect snapshot for cache
+    snap = {}
+
     for s in strikes:
         oi, iv, vol = lookup(rows, s, side)
         key = f"{side}:{s}"
@@ -229,20 +235,14 @@ def compute_side(rows, prev_map, strikes, side):
             doi = div = cvol = None
         cvolp = None if (cvol is None or oi == 0) else percent(cvol, oi)
 
-        out.append({
-            "strike": s, "doi": doi, "iv": iv, "div": div, "cvol": cvol, "cvolp": cvolp
-        })
+        out.append({"strike": s, "doi": doi, "iv": iv, "div": div, "cvol": cvol, "cvolp": cvolp})
+        snap[key] = {"oi": oi, "iv": iv, "vol": vol}
 
-        if doi is not None:
-            sum_doi += int(doi)
-        if cvol is not None:
-            sum_cvol += int(cvol)
-        if iv is not None:
-            sum_iv += iv
-        if div is not None:
-            sum_div += div
-        if cvolp is not None:
-            sum_cvolp += cvolp
+        if doi is not None:   sum_doi += int(doi)
+        if cvol is not None:  sum_cvol += int(cvol)
+        if iv is not None:    sum_iv += iv
+        if div is not None:   sum_div += div
+        if cvolp is not None: sum_cvolp += cvolp
         cnt += 1
 
     totals = {
@@ -252,8 +252,20 @@ def compute_side(rows, prev_map, strikes, side):
         "avg_div": (sum_div / cnt) if cnt else 0.0,
         "avg_cvolp": (sum_cvolp / cnt) if cnt else 0.0
     }
-    return out, totals
+    return out, totals, snap
 
+# ========== BUILD-UP TAG ==========
+def build_up_tag(fdoi, dprem):
+    # Use sign of Futures ΔOI and ΔPremium
+    if fdoi is None or dprem is None:
+        return "Neutral"
+    if fdoi > 0 and dprem > 0:   return "Long Build-up ✅"
+    if fdoi > 0 and dprem < 0:   return "Short Build-up 🔻"
+    if fdoi < 0 and dprem < 0:   return "Long Unwinding ⬇️"
+    if fdoi < 0 and dprem > 0:   return "Short Covering ⬆️"
+    return "Neutral"
+
+# ========== MAIN RUN ==========
 def run_once():
     if not is_market_open() and request.args.get("test","0") != "1":
         return {"ok": False, "msg": "market closed"}
@@ -264,60 +276,68 @@ def run_once():
 
     expiry, spot, rows = oc["expiry"], oc["spot"], oc["rows"]
 
-    # load cache
-    cache = load_cache()
-    prev_legs = cache.get("legs", {}) if cache else {}
+    cache = load_cache() or {}
+    prev_legs = cache.get("legs", {})
+    prev_premium = cache.get("premium")
+    prev_fut = cache.get("futures", {})
 
-    # strikes
     ce_strikes = pick_strikes(spot, "CE")
     pe_strikes = pick_strikes(spot, "PE")
 
-    # compute sides
-    ce_rows, ce_tot = compute_side(rows, prev_legs, ce_strikes, "CE")
-    pe_rows, pe_tot = compute_side(rows, prev_legs, pe_strikes, "PE")
+    ce_rows, ce_tot, snap_ce = compute_side(rows, prev_legs, ce_strikes, "CE")
+    pe_rows, pe_tot, snap_pe = compute_side(rows, prev_legs, pe_strikes, "PE")
 
-    # futures
-    fut_oi, fut_vol, buy, sell = fetch_futures_extras()
-    if cache and "futures" in cache:
-        pf = cache["futures"]
-        fdoi = fut_oi - float(pf.get("oi", 0))
-        fvol = fut_vol - float(pf.get("vol", 0))
+    fut_oi, fut_vol, buy, sell, fut_price = fetch_futures_extras()
+    premium = (fut_price - spot) if fut_price else None
+
+    # Futures deltas
+    if prev_fut:
+        fdoi = fut_oi - float(prev_fut.get("oi", 0))
+        fvol = fut_vol - float(prev_fut.get("vol", 0))
     else:
         fdoi = fvol = None
 
-    # save new cache (always)
+    # Premium delta
+    dprem = None
+    if premium is not None and (prev_premium is not None):
+        dprem = round(premium - float(prev_premium), 2)
+
+    # Save cache
+    new_legs = {**snap_ce, **snap_pe}
     new_cache = {
         "ts": datetime.now(IST).isoformat(),
         "expiry": expiry,
         "spot": spot,
-        "legs": {},
-        "futures": {"oi": fut_oi, "vol": fut_vol}
+        "legs": new_legs,
+        "futures": {"oi": fut_oi, "vol": fut_vol, "price": fut_price},
+        "premium": premium
     }
-    for r in ce_rows:
-        new_cache["legs"][f"CE:{r['strike']}"] = {"oi": max(0.0, r["iv"]*0 + (lookup(rows, r['strike'], 'CE')[0])),   # oi current
-                                                 "iv": r["iv"], "vol": (lookup(rows, r['strike'], 'CE')[2])}
-    for r in pe_rows:
-        new_cache["legs"][f"PE:{r['strike']}"] = {"oi": max(0.0, r["iv"]*0 + (lookup(rows, r['strike'], 'PE')[0])),
-                                                 "iv": r["iv"], "vol": (lookup(rows, r['strike'], 'PE')[2])}
     save_cache(new_cache)
 
-    # on very first priming run (no prev), don't spam telegram: return primed
-    if cache is None and request.args.get("test","0") != "1":
+    # First run → only prime cache (avoid junk deltas)
+    if not prev_legs and request.args.get("test","0") != "1":
         return {"ok": True, "primed": True, "note": "base snapshot stored"}
 
-    msg = build_message(expiry, spot, ce_rows, ce_tot, pe_rows, pe_tot, (fdoi, fvol), buy, sell)
+    build_tag = build_up_tag(fdoi, dprem)
+
+    msg = build_message(
+        expiry, spot, ce_rows, ce_tot, pe_rows, pe_tot,
+        fdoi, fvol, buy, sell,
+        prem=0.0 if premium is None else premium,
+        dprem=dprem,
+        build_tag=build_tag
+    )
     tg = send_telegram(msg)
     return {"ok": True, "sent": tg}
 
-# ---------- ROUTES ----------
+# ========== ROUTES ==========
 @app.route("/")
 def health():
     return "NIFTY Alert Bot Active ✅", 200
 
 @app.route("/run", methods=["GET", "POST"])
 def run_endpoint():
-    res = run_once()
-    return jsonify(res)
+    return jsonify(run_once())
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
